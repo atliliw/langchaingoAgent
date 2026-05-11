@@ -132,7 +132,7 @@ func (s *PageIndexStore) Search(query string, topK int) ([]PageIndexSearchResult
 	}
 	defer rows.Close()
 
-	var results []PageIndexSearchResult
+	results := make([]PageIndexSearchResult, 0)
 	for rows.Next() {
 		var r PageIndexSearchResult
 		rows.Scan(&r.DocID, &r.DocTitle, &r.Title, &r.ContentPreview, &r.Level, &r.Summary)
@@ -159,7 +159,7 @@ func (s *PageIndexStore) searchLike(query string, topK int) ([]PageIndexSearchRe
 	}
 	defer rows.Close()
 
-	var results []PageIndexSearchResult
+	results := make([]PageIndexSearchResult, 0)
 	for rows.Next() {
 		var r PageIndexSearchResult
 		rows.Scan(&r.DocID, &r.DocTitle, &r.Title, &r.ContentPreview, &r.Level, &r.Summary)
@@ -178,7 +178,7 @@ func (s *PageIndexStore) ListDocs() ([]PageIndexDoc, error) {
 	}
 	defer rows.Close()
 
-	var docs []PageIndexDoc
+	docs := make([]PageIndexDoc, 0)
 	for rows.Next() {
 		var doc PageIndexDoc
 		rows.Scan(&doc.DocID, &doc.Title)

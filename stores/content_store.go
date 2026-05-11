@@ -119,7 +119,7 @@ func (s *ContentStore) List(source *string, limit, offset int) (int, []Aggregate
 	}
 	defer rows.Close()
 
-	var items []AggregatedContent
+	items := make([]AggregatedContent, 0)
 	for rows.Next() {
 		var item AggregatedContent
 		var author, summary, keywordsStr, metadataStr sql.NullString

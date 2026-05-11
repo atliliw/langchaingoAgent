@@ -601,7 +601,7 @@ func (h *DocumentHandler) ListPageIndexDocs(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	var items []map[string]interface{}
+	items := make([]map[string]interface{}, 0)
 	for _, d := range docs {
 		items = append(items, map[string]interface{}{
 			"id": d.DocID, "title": d.Title, "type": "pageindex",
@@ -1139,8 +1139,8 @@ func NewRouter(state *AppState) http.Handler {
 	mux.HandleFunc("POST /api/documents/batch-delete", dh.BatchDeleteDocuments)
 	mux.HandleFunc("POST /api/documents/tags", dh.AddDocumentTags)
 	mux.HandleFunc("GET /api/documents/tag/{tag}", dh.GetDocumentsByTag)
-	mux.HandleFunc("GET /api/documents/{filename}/chunks", dh.GetDocumentChunks)
-	mux.HandleFunc("POST /api/documents/{parent_id}", dh.DeleteDocument)
+	mux.HandleFunc("GET /api/documents/chunks/{filename}", dh.GetDocumentChunks)
+	mux.HandleFunc("POST /api/documents/delete/{parent_id}", dh.DeleteDocument)
 
 	// Documents PageIndex
 	mux.HandleFunc("GET /api/documents/pageindex/list", dh.ListPageIndexDocs)

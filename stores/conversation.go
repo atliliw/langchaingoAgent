@@ -69,20 +69,20 @@ type TokenUsage struct {
 }
 
 type ConversationMessage struct {
-	ID          string
-	SessionID   string
-	Role        string
-	Content     string
-	Tokens      int64
-	TimeCreated int64
+	ID          string `json:"id"`
+	SessionID   string `json:"session_id"`
+	Role        string `json:"role"`
+	Content     string `json:"content"`
+	Tokens      int64  `json:"tokens"`
+	TimeCreated int64  `json:"time_created"`
 }
 
 type SessionInfo struct {
-	SessionID    string
-	Title        string
-	CreatedAt    string
-	MessageCount int
-	Preview      string
+	SessionID    string `json:"session_id"`
+	Title        string `json:"title"`
+	CreatedAt    string `json:"created_at"`
+	MessageCount int    `json:"message_count"`
+	Preview      string `json:"preview"`
 }
 
 type CompressMode int
@@ -120,9 +120,9 @@ func SearchModeFromFlags(useVector, useBM25 bool) SearchMode {
 }
 
 type CompressModeInfo struct {
-	Name        string
-	Label       string
-	Description string
+	Name        string `json:"name"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
 }
 
 func NewConversationStore(dbPath string, llm *LLMClient, config ConversationConfig) (*ConversationStore, error) {
@@ -280,25 +280,25 @@ func (s *ConversationStore) BuildMessages(sessionID string, history []Conversati
 }
 
 type ChatRequest struct {
-	SessionID    string
-	Message      string
-	SearchMode   SearchMode
-	CompressMode string
-	TopK         int
+	SessionID    string     `json:"session_id"`
+	Message      string     `json:"message"`
+	SearchMode   SearchMode `json:"search_mode"`
+	CompressMode string     `json:"compress_mode"`
+	TopK         int        `json:"top_k"`
 }
 
 type ChatResponse struct {
-	SessionID       string
-	Reply           string
-	Sources         []SourceInfo
-	Compressed      bool
-	CompressionInfo *string
+	SessionID       string       `json:"session_id"`
+	Reply           string       `json:"reply"`
+	Sources         []SourceInfo `json:"sources"`
+	Compressed      bool         `json:"compressed"`
+	CompressionInfo *string      `json:"compression_info,omitempty"`
 }
 
 type SourceInfo struct {
-	Content string
-	Score   float32
-	Source  string
+	Content string  `json:"content"`
+	Score   float32 `json:"score"`
+	Source  string  `json:"source"`
 }
 
 func ParseCompressMode(s string) CompressMode {
@@ -758,7 +758,7 @@ func (s *ConversationStore) GetHistory(sessionID string) ([]ConversationMessage,
 	}
 	defer rows.Close()
 
-	var messages []ConversationMessage
+	messages := make([]ConversationMessage, 0)
 	for rows.Next() {
 		var msg ConversationMessage
 		rows.Scan(&msg.ID, &msg.SessionID, &msg.Role, &msg.Content, &msg.Tokens, &msg.TimeCreated)
@@ -776,7 +776,7 @@ func (s *ConversationStore) GetSessions() ([]SessionInfo, error) {
 	}
 	defer rows.Close()
 
-	var sessions []SessionInfo
+	sessions := make([]SessionInfo, 0)
 	for rows.Next() {
 		var info SessionInfo
 		var timeCreated int64
@@ -932,7 +932,7 @@ func (s *ConversationStore) SearchSessions(query string) ([]SessionInfo, error) 
 	}
 	defer rows.Close()
 
-	var sessions []SessionInfo
+	sessions := make([]SessionInfo, 0)
 	for rows.Next() {
 		var info SessionInfo
 		var timeCreated int64
@@ -991,6 +991,7 @@ func (s *ConversationStore) GetAPIStats() (*ApiStatsSummary, error) {
 	weekAgo := now - 604800000
 
 	var stats ApiStatsSummary
+	stats.APITypes = make([]ApiTypeStats, 0)
 	s.db.QueryRow(
 		"SELECT COUNT(*), COALESCE(SUM(tokens_used),0), COALESCE(SUM(duration_ms),0), SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) FROM api_stats",
 	).Scan(&stats.TotalCalls, &stats.TotalTokens, &stats.TotalDurationMs, &stats.SuccessCount)

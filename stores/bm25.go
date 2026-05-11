@@ -192,7 +192,7 @@ func (s *BM25Store) ListDocuments() ([]DocumentInfo, error) {
 	}
 	defer cursor.Close(context.Background())
 
-	var infos []DocumentInfo
+	infos := make([]DocumentInfo, 0)
 	for cursor.Next(context.Background()) {
 		var doc bson.M
 		if err := cursor.Decode(&doc); err != nil {
@@ -268,7 +268,7 @@ func (s *BM25Store) GetDocumentsByTag(tag string) ([]DocumentInfo, error) {
 	}
 	defer cursor.Close(context.Background())
 
-	var infos []DocumentInfo
+	infos := make([]DocumentInfo, 0)
 	for cursor.Next(context.Background()) {
 		var doc bson.M
 		cursor.Decode(&doc)
@@ -292,11 +292,11 @@ func (s *BM25Store) GetDocumentsByTag(tag string) ([]DocumentInfo, error) {
 }
 
 type DocumentInfo struct {
-	ID             string
-	Title          string
-	ContentPreview string
-	ChunkCount     int
-	Metadata       map[string]string
+	ID             string            `json:"id"`
+	Title          string            `json:"title"`
+	ContentPreview string            `json:"content_preview"`
+	ChunkCount     int               `json:"chunk_count"`
+	Metadata       map[string]string `json:"metadata"`
 }
 
 func getBSONString(doc bson.M, key string) string {
