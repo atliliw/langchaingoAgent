@@ -291,6 +291,12 @@ func (h *ChatHandler) ChatStream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "无效的请求参数")
 		return
 	}
+	if req.TopK <= 0 {
+		req.TopK = 3
+	}
+	if req.CompressMode == "" {
+		req.CompressMode = "none"
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -301,29 +307,36 @@ func (h *ChatHandler) ChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessionID := req.SessionID
-	if sessionID == "" {
-		sessionID = uuid.New().String()
+	searchMode := stores.SearchModeFromFlags(req.UseVector, req.UseBM25)
+	chatReq := stores.ChatRequest{
+		SessionID:    req.SessionID,
+		Message:      req.Message,
+		SearchMode:   searchMode,
+		CompressMode: req.CompressMode,
+		TopK:         req.TopK,
 	}
 
+	sessionID, tokenCh, err := h.state.API.ConversationStore.ChatStream(chatReq, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// Send session event
 	fmt.Fprintf(w, "event: session\ndata: %s\n\n", sessionID)
 	flusher.Flush()
 
+	// Send mode event
 	fmt.Fprintf(w, "event: mode\ndata: %t,%t,%s\n\n", req.UseVector, req.UseBM25, req.CompressMode)
 	flusher.Flush()
 
-	fullReply := ""
-	tokenChars := []rune("这是来自 Go 端口的流式回复。项目已从 Rust 成功移植到 Go！")
-	for _, c := range tokenChars {
-		token := string(c)
-		fullReply += token
+	// Stream tokens
+	for token := range tokenCh {
 		fmt.Fprintf(w, "event: token\ndata: %s\n\n", token)
 		flusher.Flush()
-		time.Sleep(10 * time.Millisecond)
 	}
 
-	h.state.API.ConversationStore.SaveFullMessage(sessionID, req.Message, fullReply)
-
+	// Done
 	fmt.Fprintf(w, "event: done\ndata: [DONE]\n\n")
 	flusher.Flush()
 }

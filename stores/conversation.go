@@ -1,9 +1,12 @@
 package stores
 
 import (
+	"bufio"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -47,9 +50,170 @@ type LLMClient struct {
 	Model   string
 }
 
+type chatRequest struct {
+	Model       string        `json:"model"`
+	Messages    []chatMessage `json:"messages"`
+	Temperature float32       `json:"temperature,omitempty"`
+	MaxTokens   int           `json:"max_tokens,omitempty"`
+	Stream      bool          `json:"stream,omitempty"`
+}
+
+type chatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type chatResponse struct {
+	Choices []struct {
+		Message struct {
+			Content string `json:"content"`
+		} `json:"message"`
+	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage,omitempty"`
+	Model string `json:"model"`
+}
+
 func (c *LLMClient) Invoke(messages []Message) (*LLMResult, error) {
-	// Simplified LLM invocation - in production, call OpenAI API
-	return &LLMResult{Content: "LLM response placeholder", TokenUsage: &TokenUsage{TotalTokens: 50}}, nil
+	chatMsgs := make([]chatMessage, len(messages))
+	for i, m := range messages {
+		role := m.Role
+		if role == "user" {
+			role = "user"
+		} else if role == "assistant" || role == "ai" {
+			role = "assistant"
+		} else if role == "system" {
+			role = "system"
+		}
+		chatMsgs[i] = chatMessage{Role: role, Content: m.Content}
+	}
+
+	reqBody := chatRequest{
+		Model:    c.Model,
+		Messages: chatMsgs,
+	}
+	body, _ := json.Marshal(reqBody)
+
+	httpReq, err := http.NewRequest("POST", c.BaseURL+"/chat/completions", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, fmt.Errorf("创建请求失败: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+
+	httpResp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("API请求失败: %w", err)
+	}
+	defer httpResp.Body.Close()
+
+	respBody, _ := io.ReadAll(httpResp.Body)
+	if httpResp.StatusCode != 200 {
+		return nil, fmt.Errorf("API错误 (status %d): %s", httpResp.StatusCode, string(respBody))
+	}
+
+	var resp chatResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return nil, fmt.Errorf("解析响应失败: %w", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		return nil, fmt.Errorf("API返回空结果")
+	}
+
+	result := &LLMResult{
+		Content: resp.Choices[0].Message.Content,
+	}
+	if resp.Usage != nil {
+		result.TokenUsage = &TokenUsage{
+			PromptTokens:     resp.Usage.PromptTokens,
+			CompletionTokens: resp.Usage.CompletionTokens,
+			TotalTokens:      resp.Usage.TotalTokens,
+		}
+	}
+	return result, nil
+}
+
+func (c *LLMClient) StreamChat(messages []Message) (<-chan string, error) {
+	chatMsgs := make([]chatMessage, len(messages))
+	for i, m := range messages {
+		role := m.Role
+		if role == "user" {
+			role = "user"
+		} else if role == "assistant" || role == "ai" {
+			role = "assistant"
+		} else if role == "system" {
+			role = "system"
+		}
+		chatMsgs[i] = chatMessage{Role: role, Content: m.Content}
+	}
+
+	reqBody := chatRequest{
+		Model:    c.Model,
+		Messages: chatMsgs,
+		Stream:   true,
+	}
+	body, _ := json.Marshal(reqBody)
+
+	httpReq, err := http.NewRequest("POST", c.BaseURL+"/chat/completions", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, fmt.Errorf("创建请求失败: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	httpReq.Header.Set("Accept", "text/event-stream")
+
+	httpResp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("API请求失败: %w", err)
+	}
+
+	if httpResp.StatusCode != 200 {
+		respBody, _ := io.ReadAll(httpResp.Body)
+		httpResp.Body.Close()
+		return nil, fmt.Errorf("API错误 (status %d): %s", httpResp.StatusCode, string(respBody))
+	}
+
+	ch := make(chan string, 100)
+	go func() {
+		defer close(ch)
+		defer httpResp.Body.Close()
+
+		scanner := bufio.NewScanner(httpResp.Body)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := strings.TrimPrefix(line, "data: ")
+			if data == "[DONE]" {
+				return
+			}
+
+			var chunk struct {
+				Choices []struct {
+					Delta struct {
+						Content string `json:"content"`
+					} `json:"delta"`
+				} `json:"choices"`
+			}
+			if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+				continue
+			}
+			for _, choice := range chunk.Choices {
+				if choice.Delta.Content != "" {
+					ch <- choice.Delta.Content
+				}
+			}
+		}
+	}()
+	return ch, nil
 }
 
 type Message struct {
@@ -240,6 +404,54 @@ func (s *ConversationStore) Chat(request ChatRequest, ragSources []SourceInfo) (
 		Compressed:      compressed,
 		CompressionInfo: compInfo,
 	}, nil
+}
+
+// ChatStream returns a channel of streaming tokens. Caller must read until channel closes.
+func (s *ConversationStore) ChatStream(request ChatRequest, ragSources []SourceInfo) (string, <-chan string, error) {
+	sessionID := request.SessionID
+	if sessionID == "" {
+		sessionID = uuid.New().String()
+	}
+
+	exists, err := s.SessionExists(sessionID)
+	if err != nil {
+		return "", nil, err
+	}
+	if !exists {
+		if err := s.CreateSession(sessionID, "新对话"); err != nil {
+			return "", nil, err
+		}
+	}
+
+	history, err := s.GetHistory(sessionID)
+	if err != nil {
+		return "", nil, err
+	}
+
+	messages, _, _, err := s.BuildMessages(sessionID, history, request.Message, request.SearchMode, ragSources, request.CompressMode)
+	if err != nil {
+		return "", nil, err
+	}
+
+	tokenCh, err := s.llm.StreamChat(messages)
+	if err != nil {
+		return "", nil, err
+	}
+
+	fullReplyCh := make(chan string, 200)
+	go func() {
+		defer close(fullReplyCh)
+		var fullReply string
+		for token := range tokenCh {
+			fullReply += token
+			fullReplyCh <- token
+		}
+		s.saveMessage(sessionID, "user", request.Message)
+		s.saveMessage(sessionID, "assistant", fullReply)
+		s.UpdateSessionStats(sessionID)
+	}()
+
+	return sessionID, fullReplyCh, nil
 }
 
 func (s *ConversationStore) BuildMessages(sessionID string, history []ConversationMessage, currentMessage string, searchMode SearchMode, ragSources []SourceInfo, compressModeStr string) ([]Message, bool, *string, error) {
