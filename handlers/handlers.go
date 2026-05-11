@@ -881,16 +881,20 @@ func (h *LangGraphHandler) PageIndexSearch(w http.ResponseWriter, r *http.Reques
 
 func (h *LangGraphHandler) AgentPlan(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Task      string `json:"task"`
-		UseRag    bool   `json:"use_rag"`
-		UseRouting bool  `json:"use_routing"`
+		Task       string `json:"task"`
+		UseRag     bool   `json:"use_rag"`
+		UseRouting bool   `json:"use_routing"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "无效的请求参数")
 		return
 	}
-	svc := services.NewLangGraphDemoService()
-	plan, err := svc.AgentPlan(h.state.API, req.Task, req.UseRag, req.UseRouting)
+	engine := &services.AgentEngine{}
+	ragCtx := ""
+	if req.UseRag {
+		ragCtx = h.state.API.SearchKnowledgeBase(req.Task, 5)
+	}
+	plan, err := engine.Plan(h.state.Cfg, req.Task, ragCtx, req.UseRag, req.UseRouting)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -908,8 +912,12 @@ func (h *LangGraphHandler) AgentExecute(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "无效的请求参数")
 		return
 	}
-	svc := services.NewLangGraphDemoService()
-	result, err := svc.AgentExecuteAll(h.state.API, req.Task, req.Tasks, req.UseRag)
+	engine := &services.AgentEngine{}
+	ragCtx := ""
+	if req.UseRag {
+		ragCtx = h.state.API.SearchKnowledgeBase(req.Task, 5)
+	}
+	result, err := engine.ExecuteAllBatches(h.state.Cfg, req.Task, req.Tasks, ragCtx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -921,16 +929,29 @@ func (h *LangGraphHandler) AgentExecute(w http.ResponseWriter, r *http.Request) 
 
 func (h *LangGraphHandler) AgentExecuteAll(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Task   string            `json:"task"`
-		Tasks  []services.AgentTask `json:"agent_tasks"`
-		UseRag bool              `json:"use_rag"`
+		Task   string                `json:"task"`
+		Tasks  []services.AgentTask  `json:"agent_tasks"`
+		UseRag bool                  `json:"use_rag"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "无效的请求参数")
 		return
 	}
-	svc := services.NewLangGraphDemoService()
-	result, err := svc.AgentExecuteAll(h.state.API, req.Task, req.Tasks, req.UseRag)
+	engine := &services.AgentEngine{}
+	ragCtx := ""
+	if req.UseRag {
+		ragCtx = h.state.API.SearchKnowledgeBase(req.Task, 5)
+	}
+	tasks := req.Tasks
+	if len(tasks) == 0 {
+		plan, planErr := engine.Plan(h.state.Cfg, req.Task, ragCtx, req.UseRag, false)
+		if planErr != nil {
+			writeError(w, http.StatusInternalServerError, "规划失败: "+planErr.Error())
+			return
+		}
+		tasks = plan.Tasks
+	}
+	result, err := engine.ExecuteAllBatches(h.state.Cfg, req.Task, tasks, ragCtx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

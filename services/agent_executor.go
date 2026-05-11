@@ -4,12 +4,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/atliliw/lanchaingo-agent/stores"
 	_ "modernc.org/sqlite"
 )
 
@@ -224,24 +223,95 @@ func parseTasks(s string) ([]AgentTask, error) {
 	return tasks, nil
 }
 
+// ── LLM Helper ──
+
+func newLLMClient(cfg ServiceConfig) *stores.LLMClient {
+	return &stores.LLMClient{
+		APIKey:  cfg.OpenAIAPIKey,
+		BaseURL: cfg.OpenAIBaseURL,
+		Model:   cfg.ChatModel,
+	}
+}
+
+func callLLM(client *stores.LLMClient, prompt string) (string, error) {
+	result, err := client.Invoke([]stores.Message{{Role: "user", Content: prompt}})
+	if err != nil {
+		return "", err
+	}
+	return result.Content, nil
+}
+
 // ── Plan ──
 
 func (e *AgentEngine) Plan(config ServiceConfig, task string, ragContext string, useRag bool, useRouting bool) (*AgentPlan, error) {
-	content := mockLLMPlan(task)
+	llm := newLLMClient(config)
 
-	tasks, err := parseTasks(content)
+	toolsJSON, _ := json.Marshal(AvailableTools)
+	tj := string(toolsJSON)
+
+	routingSection := ""
+	if useRouting {
+		routingSection = `注意：如果任务需要根据中间结果决定下一步，必须创建 type=decision 的决策节点。
+决策节点不需要 tool，通过 routes 定义走向（key=结果, value=下一个任务）。
+routes 中的所有 value 必须在同一个任务列表中创建对应的子任务，每个子任务用 depends_on 指向决策节点。
+如果任务需要人工审批才能继续，创建 type=human_review 的审核节点。
+示例：调研Go和Python后，需要判断信息是否充分：
+[
+  {"name":"调研Go","tool":"rag_search","depends_on":[],"task_type":"normal","input_template":""},
+  {"name":"调研Python","tool":"rag_search","depends_on":[],"task_type":"normal","input_template":""},
+  {"name":"判断信息是否充分","task_type":"decision","depends_on":["调研Go","调研Python"],"routes":{"充分":"写对比","不充分":"补充搜索"},"input_template":""},
+  {"name":"补充搜索","tool":"web_search","depends_on":["判断信息是否充分"],"task_type":"normal","input_template":""},
+  {"name":"写对比","tool":"llm_query","depends_on":["判断信息是否充分"],"task_type":"normal","input_template":""}
+]`
+	}
+
+	prompt := ""
+	if useRag && ragContext != "" {
+		prompt = fmt.Sprintf(
+			"第一个子任务必须是「知识库检索」，使用 rag_search 工具。后续子任务基于知识库检索的结果执行。\n\n知识库检索到以下相关信息：\n%s\n%s\n将任务拆解为2-5个子任务并分配工具。\n要求：对比类任务必须将A和B拆成独立的搜索任务（depends_on为空），最终汇总任务depends_on所有搜索任务。\n可用工具：%s\n返回JSON：[{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"task_type\": \"normal\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }]\n任务：%s\n只返回JSON。",
+			ragContext, routingSection, tj, task,
+		)
+	} else {
+		prompt = fmt.Sprintf(
+			"将任务拆解为2-5个子任务并分配工具。\n%s\n要求：对比类任务必须将A和B拆成独立的搜索任务（depends_on为空），最终汇总任务depends_on所有搜索任务。\n可用工具：%s\n返回JSON：[{ \"name\": \"子任务名（中文）\", \"description\": \"做什么\", \"tool\": \"工具名\", \"task_type\": \"normal\", \"depends_on\": [\"前置\"], \"input_template\": \"需要什么\" }]\n任务：%s\n只返回JSON。",
+			routingSection, tj, task,
+		)
+	}
+
+	content, err := callLLM(llm, prompt)
 	if err != nil {
-		// Try fix JSON
+		return nil, fmt.Errorf("LLM规划失败: %w", err)
+	}
+	content = strings.TrimSpace(content)
+	content = strings.TrimPrefix(content, "```json")
+	content = strings.TrimPrefix(content, "```")
+	content = strings.TrimSuffix(content, "```")
+	content = strings.TrimSpace(content)
+
+	tasks, parseErr := parseTasks(content)
+	if parseErr != nil {
 		fixed := fixJSON(content)
-		tasks, err = parseTasks(fixed)
-		if err != nil {
-			// Fallback: generate default tasks
-			tasks = generateDefaultTasks(task)
+		tasks, parseErr = parseTasks(fixed)
+		if parseErr != nil {
+			fixPrompt := fmt.Sprintf("JSON 格式错误：%v\n\n原始内容：\n```\n%s\n```\n\n请修正为合法 JSON，只返回修正后的 JSON。", parseErr, content)
+			fixResult, fixErr := callLLM(llm, fixPrompt)
+			if fixErr == nil {
+				fixed2 := strings.TrimSpace(fixResult)
+				fixed2 = strings.TrimPrefix(fixed2, "```json")
+				fixed2 = strings.TrimPrefix(fixed2, "```")
+				fixed2 = strings.TrimSuffix(fixed2, "```")
+				fixed2 = strings.TrimSpace(fixed2)
+				tasks, parseErr = parseTasks(fixJSON(fixed2))
+			}
 		}
 	}
 
-	if len(tasks) == 0 {
-		tasks = generateDefaultTasks(task)
+	if parseErr != nil || len(tasks) == 0 {
+		tasks = []AgentTask{
+			{Name: "知识库检索", Description: "检索相关知识", Tool: "rag_search", DependsOn: []string{}, TaskType: "normal"},
+			{Name: "信息分析", Description: "分析检索结果", Tool: "llm_query", DependsOn: []string{"知识库检索"}, TaskType: "normal"},
+			{Name: "总结报告", Description: "生成总结报告", Tool: "llm_query", DependsOn: []string{"信息分析"}, TaskType: "normal"},
+		}
 	}
 
 	gs := buildGraph(tasks)
@@ -250,22 +320,6 @@ func (e *AgentEngine) Plan(config ServiceConfig, task string, ragContext string,
 		Tasks:         tasks,
 		GraphStructure: gs,
 	}, nil
-}
-
-func mockLLMPlan(task string) string {
-	return fmt.Sprintf(`[
-		{"name":"分析需求","description":"分析任务「%s」的需求","tool":"llm_query","task_type":"normal","depends_on":[],"input_template":""},
-		{"name":"搜索信息","description":"收集相关信息","tool":"web_search","task_type":"normal","depends_on":["分析需求"],"input_template":""},
-		{"name":"总结报告","description":"生成总结报告","tool":"llm_query","task_type":"normal","depends_on":["搜索信息"],"input_template":""}
-	]`, task)
-}
-
-func generateDefaultTasks(task string) []AgentTask {
-	return []AgentTask{
-		{Name: "知识库检索", Description: "检索相关知识", Tool: "rag_search", DependsOn: []string{}, TaskType: "normal"},
-		{Name: "信息分析", Description: "分析检索结果", Tool: "llm_query", DependsOn: []string{"知识库检索"}, TaskType: "normal"},
-		{Name: "总结报告", Description: "生成总结报告", Tool: "llm_query", DependsOn: []string{"信息分析"}, TaskType: "normal"},
-	}
 }
 
 func buildGraph(tasks []AgentTask) interface{} {
@@ -352,6 +406,7 @@ func buildBatchGraph(config ServiceConfig, task string, batch []AgentTask, ctx s
 // ── Run Batch ──
 
 func runBatch(config ServiceConfig, task string, batch []AgentTask, context []AgentExecResult, ragContext string) ([]AgentExecResult, error) {
+	llm := newLLMClient(config)
 	ctxStr := ""
 	for _, r := range context {
 		ctxStr += fmt.Sprintf("【%s】\n%s\n\n", r.TaskName, r.Output)
@@ -376,7 +431,12 @@ func runBatch(config ServiceConfig, task string, batch []AgentTask, context []Ag
 			}
 			prompt := fmt.Sprintf("基于以下信息做出判断，只返回决策结果（%s），不要多余内容。\n\n%s\n\n当前决策：%s",
 				strings.Join(routeOptions, " 或 "), ctxStr, at.Description)
-			output = mockLLMResponse(prompt)
+			result, err := callLLM(llm, prompt)
+			if err != nil {
+				output = fmt.Sprintf("决策失败: %v", err)
+			} else {
+				output = result
+			}
 			tokens = estimateTokenUsage(prompt, output)
 
 		default:
@@ -384,27 +444,37 @@ func runBatch(config ServiceConfig, task string, batch []AgentTask, context []Ag
 			case "llm_query", "":
 				prompt := fmt.Sprintf("任务：%s\n当前子任务：%s\n\n前置结果：\n%s\n\n请执行当前子任务并输出结果。",
 					task, at.Description, ctxStr)
-				output = mockLLMResponse(prompt)
+				result, err := callLLM(llm, prompt)
+				if err != nil {
+					output = fmt.Sprintf("执行失败: %v", err)
+				} else {
+					output = result
+				}
 				tokens = estimateTokenUsage(prompt, output)
 
 			case "web_search":
 				prompt := fmt.Sprintf("任务：%s\n当前子任务：%s\n\n请基于你的知识回答。",
 					task, at.Description)
-				output = mockLLMResponse(prompt)
+				result, err := callLLM(llm, prompt)
+				if err != nil {
+					output = fmt.Sprintf("搜索失败: %v", err)
+				} else {
+					output = result
+				}
 				tokens = estimateTokenUsage(prompt, output)
 
 			case "weather":
 				cityPrompt := fmt.Sprintf("任务：%s\n当前子任务：%s\n\n请输出要查询天气的城市名，不要多余内容。",
 					task, at.Description)
-				city := mockLLMResponse(cityPrompt)
-				city = strings.TrimSpace(city)
-				if city == "" {
+				city, err := callLLM(llm, cityPrompt)
+				if err != nil || strings.TrimSpace(city) == "" {
 					city = at.Description
 				}
+				city = strings.TrimSpace(city)
 				tool := NewWeatherTool()
-				wResult, err := tool.Invoke(WeatherInput{City: city})
-				if err != nil {
-					output = fmt.Sprintf("天气查询失败: %v", err)
+				wResult, wErr := tool.Invoke(WeatherInput{City: city})
+				if wErr != nil {
+					output = fmt.Sprintf("天气查询失败: %v", wErr)
 				} else {
 					output = fmt.Sprintf("%s的天气：%s", city, wResult.Weather)
 				}
@@ -425,7 +495,12 @@ func runBatch(config ServiceConfig, task string, batch []AgentTask, context []Ag
 			default:
 				prompt := fmt.Sprintf("任务：%s\n子任务：%s\n(工具:%s 不可用，请直接用 LLM 执行)\n\n上下文：\n%s\n\n输出结果。",
 					task, at.Description, at.Tool, ctxStr)
-				output = mockLLMResponse(prompt)
+				result, err := callLLM(llm, prompt)
+				if err != nil {
+					output = fmt.Sprintf("执行失败: %v", err)
+				} else {
+					output = result
+				}
 				tokens = estimateTokenUsage(prompt, output)
 			}
 		}
@@ -442,20 +517,6 @@ func runBatch(config ServiceConfig, task string, batch []AgentTask, context []Ag
 	}
 
 	return results, nil
-}
-
-func mockLLMResponse(prompt string) string {
-	promptRunes := []rune(prompt)
-	if len(promptRunes) > 100 {
-		promptRunes = promptRunes[:100]
-	}
-	responses := []string{
-		"已完成任务分析，结果如下：基于输入信息，可以得出以下结论...",
-		"任务执行成功。关键发现：需要进一步调研相关内容。",
-		"分析完成。主要结论：当前信息充分，可以继续进行下一步。",
-		"搜索完成。找到以下相关信息：该领域的最新进展包括多个重要方向。",
-	}
-	return responses[rand.Intn(len(responses))]
 }
 
 // ── Parse Decision ──
@@ -501,247 +562,31 @@ func skipDownstream(tasks []AgentTask, start string, done map[string]bool, resul
 	}
 }
 
-// ── Execute Batch Start ──
-
-func (e *AgentEngine) ExecuteBatchStart(config ServiceConfig, task string, agentTasks []AgentTask, ragContext string, db *sql.DB) (string, []AgentExecResult, bool, error) {
-	sid := uuid.New().String()
-	done := make(map[string]bool)
-	batch := readyBatch(agentTasks, done)
-	if len(batch) == 0 {
-		return "", nil, false, fmt.Errorf("没有可执行的任务")
-	}
-
-	results, err := runBatch(config, task, batch, nil, ragContext)
-	if err != nil {
-		return "", nil, false, err
-	}
-
-	var skippedResults []AgentExecResult
-	for _, r := range results {
-		if decided := parseDecision(r.Output); decided != nil {
-			for _, t := range agentTasks {
-				if t.Name == r.TaskName {
-					for routeKey, nextTask := range t.Routes {
-						if routeKey != *decided {
-							skipDownstream(agentTasks, nextTask, done, &skippedResults)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	var reviewPending []AgentTask
-	for _, t := range batch {
-		if t.TaskType == "human_review" {
-			reviewPending = append(reviewPending, t)
-		}
-	}
-
-	completedNames := make(map[string]bool)
-	for _, r := range results {
-		isReview := false
-		for _, p := range reviewPending {
-			if p.Name == r.TaskName {
-				isReview = true
-				break
-			}
-		}
-		if !isReview {
-			completedNames[r.TaskName] = true
-		}
-	}
-	var doneResults []AgentExecResult
-	for _, r := range results {
-		isReview := false
-		for _, p := range reviewPending {
-			if p.Name == r.TaskName {
-				isReview = true
-				break
-			}
-		}
-		if !isReview {
-			doneResults = append(doneResults, r)
-		}
-	}
-	doneResults = append(doneResults, skippedResults...)
-
-	if db != nil {
-		ensureAgentTables(db)
-		saveAgentSession(db, sid, task)
-		for _, r := range doneResults {
-			saveAgentResult(db, sid, &r)
-		}
-	}
-
-	hasMore := len(reviewPending) == 0
-	if hasMore {
-		remaining := readyBatch(agentTasks, completedNames)
-		hasMore = false
-		for _, t := range remaining {
-			if !completedNames[t.Name] {
-				hasMore = true
-				break
-			}
-		}
-	}
-
-	storeMu.Lock()
-	store[sid] = &BatchState{
-		Task:           task,
-		All:            agentTasks,
-		Done:           doneResults,
-		CompletedNames: completedNames,
-		Start:          time.Now(),
-		RagContext:     ragContext,
-		ReviewPending:  reviewPending,
-	}
-	storeMu.Unlock()
-
-	return sid, results, hasMore, nil
-}
-
-// ── Execute Batch Next ──
-
-func (e *AgentEngine) ExecuteBatchNext(config ServiceConfig, sid string, db *sql.DB) ([]AgentExecResult, bool, error) {
-	storeMu.Lock()
-	s, ok := store[sid]
-	if !ok {
-		storeMu.Unlock()
-		return nil, false, fmt.Errorf("session不存在: %s", sid)
-	}
-	if len(s.ReviewPending) > 0 {
-		storeMu.Unlock()
-		return nil, false, fmt.Errorf("有待审批的人工审核任务，请先审批")
-	}
-
-	task := s.Task
-	all := s.All
-	completedNames := make(map[string]bool)
-	for k, v := range s.CompletedNames {
-		completedNames[k] = v
-	}
-	dones := make([]AgentExecResult, len(s.Done))
-	copy(dones, s.Done)
-	ragCtx := s.RagContext
-	storeMu.Unlock()
-
-	batch := readyBatch(all, completedNames)
-	if len(batch) == 0 {
-		return nil, false, fmt.Errorf("没有更多可执行任务")
-	}
-
-	results, err := runBatch(config, task, batch, dones, ragCtx)
-	if err != nil {
-		return nil, false, err
-	}
-
-	var newReviewPending []AgentTask
-	for _, t := range batch {
-		if t.TaskType == "human_review" {
-			newReviewPending = append(newReviewPending, t)
-		}
-	}
-
-	storeMu.Lock()
-	if state, ok := store[sid]; ok {
-		for _, r := range results {
-			isReview := false
-			for _, p := range newReviewPending {
-				if p.Name == r.TaskName {
-					isReview = true
-					break
-				}
-			}
-			if !isReview {
-				state.Done = append(state.Done, r)
-				state.CompletedNames[r.TaskName] = true
-			}
-		}
-
-		for _, r := range results {
-			if decided := parseDecision(r.Output); decided != nil {
-				for _, t := range all {
-					if t.Name == r.TaskName {
-						for routeKey, nextTask := range t.Routes {
-							if routeKey != *decided {
-								skipDownstream(all, nextTask, state.CompletedNames, &state.Done)
-							}
-						}
-					}
-				}
-			}
-		}
-
-		for _, t := range newReviewPending {
-			alreadyExists := false
-			for _, p := range state.ReviewPending {
-				if p.Name == t.Name {
-					alreadyExists = true
-					break
-				}
-			}
-			if !alreadyExists {
-				state.ReviewPending = append(state.ReviewPending, t)
-			}
-		}
-
-		hasMore := len(state.ReviewPending) == 0 && len(state.CompletedNames) < len(state.All)
-
-		if db != nil {
-			for _, r := range results {
-				isReview := false
-				for _, p := range newReviewPending {
-					if p.Name == r.TaskName {
-						isReview = true
-						break
-					}
-				}
-				if !isReview {
-					saveAgentResult(db, sid, &r)
-				}
-			}
-			if !hasMore && len(newReviewPending) == 0 {
-				updateAgentSessionStatus(db, sid, "completed")
-			}
-		}
-
-		storeMu.Unlock()
-		return results, hasMore, nil
-	}
-	storeMu.Unlock()
-	return results, false, nil
-}
-
 // ── Execute All Batches ──
 
 func (e *AgentEngine) ExecuteAllBatches(config ServiceConfig, task string, agentTasks []AgentTask, ragContext string) (*AgentExecResponse, error) {
 	totalStart := time.Now()
-
-	done := make(map[string]bool)
+	doneMap := make(map[string]bool)
 	var allResults []AgentExecResult
 
-	for len(done) < len(agentTasks) {
-		batch := readyBatch(agentTasks, done)
+	for len(doneMap) < len(agentTasks) {
+		batch := readyBatch(agentTasks, doneMap)
 		if len(batch) == 0 {
 			break
 		}
-
 		results, err := runBatch(config, task, batch, allResults, ragContext)
 		if err != nil {
 			return nil, err
 		}
-
 		for _, r := range results {
-			done[r.TaskName] = true
+			doneMap[r.TaskName] = true
 			allResults = append(allResults, r)
-
 			if decided := parseDecision(r.Output); decided != nil {
 				for _, t := range agentTasks {
 					if t.Name == r.TaskName {
 						for routeKey, nextTask := range t.Routes {
 							if routeKey != *decided {
-								skipDownstream(agentTasks, nextTask, done, &allResults)
+								skipDownstream(agentTasks, nextTask, doneMap, &allResults)
 							}
 						}
 					}
@@ -755,97 +600,16 @@ func (e *AgentEngine) ExecuteAllBatches(config ServiceConfig, task string, agent
 	for _, r := range allResults {
 		totalTokens += r.Tokens
 	}
-
 	finalAnswer := ""
 	if len(allResults) > 0 {
 		finalAnswer = allResults[len(allResults)-1].Output
 	}
-
 	return &AgentExecResponse{
 		Results:         allResults,
 		FinalAnswer:     finalAnswer,
 		TotalDurationMs: totalDuration,
 		TotalTokens:     totalTokens,
 	}, nil
-}
-
-// ── Batch Finalize ──
-
-func (e *AgentEngine) BatchFinalize(sid string, db *sql.DB) (*AgentExecResponse, error) {
-	storeMu.Lock()
-	state, ok := store[sid]
-	if ok {
-		delete(store, sid)
-	}
-	storeMu.Unlock()
-
-	if !ok {
-		return &AgentExecResponse{
-			Results:     []AgentExecResult{},
-			FinalAnswer: "完成",
-		}, nil
-	}
-
-	if db != nil {
-		updateAgentSessionStatus(db, sid, "completed")
-	}
-
-	finalAnswer := ""
-	if len(state.Done) > 0 {
-		finalAnswer = state.Done[len(state.Done)-1].Output
-	}
-	totalTokens := 0
-	for _, r := range state.Done {
-		totalTokens += r.Tokens
-	}
-
-	return &AgentExecResponse{
-		Results:         state.Done,
-		FinalAnswer:     finalAnswer,
-		TotalDurationMs: uint64(time.Since(state.Start).Milliseconds()),
-		TotalTokens:     totalTokens,
-	}, nil
-}
-
-// ── Approve Review ──
-
-func (e *AgentEngine) ApproveReview(sid, taskName string, approved bool, feedback string) error {
-	storeMu.Lock()
-	defer storeMu.Unlock()
-
-	state, ok := store[sid]
-	if !ok {
-		return fmt.Errorf("session不存在: %s", sid)
-	}
-
-	idx := -1
-	for i, t := range state.ReviewPending {
-		if t.Name == taskName {
-			idx = i
-			break
-		}
-	}
-	if idx < 0 {
-		return fmt.Errorf("找不到待审批任务: %s", taskName)
-	}
-
-	task := state.ReviewPending[idx]
-	state.ReviewPending = append(state.ReviewPending[:idx], state.ReviewPending[idx+1:]...)
-
-	status := "✅ 人工审批通过"
-	if !approved {
-		status = "❌ 人工审批拒绝"
-	}
-
-	state.CompletedNames[taskName] = true
-	state.Done = append(state.Done, AgentExecResult{
-		TaskName:     taskName,
-		Tool:         "human_review",
-		InputSummary: task.Description,
-		Output:       fmt.Sprintf("%s。反馈：%s", status, feedback),
-	})
-
-	return nil
 }
 
 func truncateStr(s string, maxLen int) string {
