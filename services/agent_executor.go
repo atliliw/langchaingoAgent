@@ -523,18 +523,38 @@ func runBatch(config ServiceConfig, task string, batch []AgentTask, context []Ag
 
 func parseDecision(output string) *string {
 	lower := strings.ToLower(output)
-	keywords := []string{"通过", "充分", "enough", "yes", "不通过", "不充分", "not enough", "no", "tech", "general", "other"}
-	for _, kw := range keywords {
-		if strings.Contains(lower, kw) {
-			return &kw
-		}
+
+	// 否定词必须先匹配，否则"不充分"会先命中"充分"
+	if strings.Contains(lower, "不充分") || strings.Contains(lower, "not enough") || strings.Contains(lower, "不足") || strings.Contains(lower, "缺少") {
+		s := "不充分"
+		return &s
 	}
-	if strings.Contains(lower, "充足") || strings.Contains(lower, "足够") || strings.Contains(lower, "够") {
+	if strings.Contains(lower, "不通过") || strings.Contains(lower, "no") {
+		s := "不通过"
+		return &s
+	}
+
+	// 肯定词后匹配
+	if strings.Contains(lower, "充分") || strings.Contains(lower, "enough") || strings.Contains(lower, "充足") || strings.Contains(lower, "足够") || strings.Contains(lower, "够") {
 		s := "充分"
 		return &s
 	}
-	if strings.Contains(lower, "不足") || strings.Contains(lower, "缺少") {
-		s := "不充分"
+	if strings.Contains(lower, "通过") || strings.Contains(lower, "yes") {
+		s := "通过"
+		return &s
+	}
+
+	// 通用分类
+	if strings.Contains(lower, "tech") {
+		s := "tech"
+		return &s
+	}
+	if strings.Contains(lower, "general") {
+		s := "general"
+		return &s
+	}
+	if strings.Contains(lower, "other") {
+		s := "other"
 		return &s
 	}
 	return nil
