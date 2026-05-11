@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LangChainRust Demo - 向量搜索 + RAG 对话</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <button class="dark-mode-toggle" onclick="toggleDarkMode()">🌙 深色模式</button>
+    <div class="container">
+        <div class="sidebar">
+            <h1>LangChainRust</h1>
+            <div class="nav-menu">
+                <div class="nav-item active" onclick="showTab('upload')">📁 文件上传</div>
+                <div class="nav-item" onclick="showTab('documents')">📄 文档管理</div>
+                <div class="nav-item" onclick="showTab('bm25')">🔍 BM25搜索</div>
+                <div class="nav-item" onclick="showTab('vector')">🎯 向量搜索</div>
+                <div class="nav-item" onclick="showTab('compare')">⚡ 搜索对比</div>
+                <div class="nav-item" onclick="showTab('chat')">💬 RAG对话</div>
+                <div class="nav-item" onclick="showTab('langgraph')">🔗 LangGraph</div>
+                <div class="nav-item" onclick="showTab('agent')">🤖 Agent</div>
+                <div class="nav-item" onclick="showTab('aggregate')">🌐 AI聚合</div>
+                <div class="nav-item" onclick="showTab('monitor')">📊 系统监控</div>
+                <div class="nav-item" onclick="showTab('compress')">⚙️ 压缩策略</div>
+                <div class="nav-item" onclick="showTab('pageindex_search')">📑 PageIndex</div>
+                <div class="nav-item" onclick="showTab('sessions')">📋 会话列表</div>
+            </div>
+        </div>
+        
+        <div class="main-content">
+            <div class="stats-bar" id="stats-content" style="display:flex;gap:10px;padding:6px 12px;background:#f8fafc;border-radius:6px;margin-bottom:10px;font-size:12px;color:#64748b;">
+                <div>📄 文档: <strong id="total-docs" style="color:#1e40af;">0</strong></div>
+                <div>🧬 向量: <strong id="vector-size" style="color:#1e40af;">1536</strong>d</div>
+                <div>🔤 BM25: <strong id="bm25-chunks" style="color:#1e40af;">0</strong></div>
+                <div>💬 会话: <strong id="sessions-count" style="color:#1e40af;">0</strong></div>
+            </div>
+        
+        <div id="upload-tab" class="card">
+            <h2>上传文档</h2>
+            <p style="color: #666; margin-bottom: 15px;">支持文件类型：TXT, PDF, MD, JSON, CSV</p>
+            <div style="margin-bottom: 15px; display: flex; gap: 20px; align-items: center; flex-wrap: wrap;">
+                <label style="font-size: 13px; color: #475569;">
+                    切分策略：
+                    <select id="chunk-strategy" style="padding: 6px 10px; border: 1px solid #d1d5db; border-radius: 6px; font-size: 13px; margin-left: 6px;">
+                        <option value="recursive">递归分割（默认·500字符）</option>
+                        <option value="large">大块分割（1000字符）</option>
+                        <option value="small">小块分割（200字符）</option>
+                        <option value="paragraph">段落分割（完整段落）</option>
+                        <option value="token">Token分割（512tokens）</option>
+                        <option value="semantic">语义分割（Embedding）</option>
+                        <option value="pageindex">PageIndex 文档树（无需向量）</option>
+                    </select>
+                </label>
+                <span style="font-size: 12px; color: #94a3b8;" id="chunk-strategy-desc">按段落→行→句→字符递归切分，chunk_size=500</span>
+            </div>
+            <div class="upload-area" id="upload-area">
+                <p>点击或拖拽文件到此处上传</p>
+                <input type="file" id="file-input" style="display: none" accept=".txt,.pdf,.md,.json,.csv">
+            </div>
+            <div id="upload-progress" class="progress hidden">
+                <div class="progress-bar" id="progress-bar"></div>
+            </div>
+            <div id="upload-result"></div>
+            <div style="margin-top: 20px;">
+                <button class="btn btn-danger" onclick="clearAll()">清空所有数据</button>
+            </div>
+        </div>
+        
+        <div id="documents-tab" class="card hidden">
+            <h2>文档管理</h2>
+            <p style="color: #666; margin-bottom: 15px;">查看已上传的文档，支持单独删除（BM25 + 向量同步清除）</p>
+            <div style="margin-bottom: 15px;">
+                <button class="btn" onclick="loadDocuments()">刷新列表</button>
+            </div>
+            <div id="documents-list"></div>
+        </div>
+        
+        <div id="bm25-tab" class="card hidden">
+            <h2>BM25 搜索</h2>
+            <p style="color: #666; margin-bottom: 15px;">关键词匹配搜索，适合精确术语查询</p>
+            <div class="search-box">
+                <input type="text" id="bm25-query" placeholder="输入搜索内容..." />
+                <button class="btn" onclick="bm25Search()">搜索</button>
+            </div>
+            <div style="margin-top: 10px; color: #666;">
+                <label>返回结果数量：</label>
+                <input type="number" id="bm25-top-k" value="5" min="1" max="20" style="width: 60px; padding: 5px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div id="bm25-results"></div>
+        </div>
+        
+        <div id="vector-tab" class="card hidden">
+            <h2>向量搜索</h2>
+            <p style="color: #666; margin-bottom: 15px;">语义相似搜索，适合概念理解和模糊表达</p>
+            <div class="search-box">
+                <input type="text" id="vector-query" placeholder="输入搜索内容..." />
+                <button class="btn" onclick="vectorSearch()">搜索</button>
+            </div>
+            <div style="margin-top: 10px; color: #666;">
+                <label>返回结果数量：</label>
+                <input type="number" id="vector-top-k" value="5" min="1" max="20" style="width: 60px; padding: 5px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div id="vector-results"></div>
+        </div>
+        
+        <div id="compare-tab" class="card hidden">
+            <h2>搜索对比测试</h2>
+            <p style="color: #666; margin-bottom: 15px;">对比三种搜索模式：向量检索、BM25检索、混合检索</p>
+            <div class="search-box">
+                <input type="text" id="compare-query" placeholder="输入搜索内容..." />
+                <button class="btn" onclick="compareSearch()">对比搜索</button>
+            </div>
+            <div style="margin-top: 10px; color: #666;">
+                <label>返回结果数量：</label>
+                <input type="number" id="compare-top-k" value="5" min="1" max="20" style="width: 60px; padding: 5px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div id="compare-results"></div>
+        </div>
+        
+        <div id="chat-tab" class="card hidden">
+            <h2>RAG 对话</h2>
+            <p style="color: #666; margin-bottom: 15px;">基于文档库的智能对话。选择搜索模式和对话压缩策略。</p>
+            <div class="chat-container">
+                <div class="chat-main">
+                    <div class="chat-options">
+                        <label><input type="checkbox" id="use-vector" />向量检索</label>
+                        <label><input type="checkbox" id="use-bm25" />BM25检索</label>
+                        <label style="color: #667eea; font-weight: bold;"><input type="checkbox" id="use-hybrid" />混合检索</label>
+                        <label style="color: #28a745; font-weight: bold;"><input type="checkbox" id="use-none" checked />纯对话（不使用RAG）</label>
+                        <label>结果数：<input type="number" id="rag-top-k" value="5" min="1" max="10" style="width: 50px; padding: 5px; border: 1px solid #ddd; border-radius: 4px;"></label>
+                    </div>
+                    <div class="chat-options" style="margin-top: 10px; border-top: 1px solid #eee; padding-top: 10px;">
+                        <span style="color: #666; font-size: 13px; margin-right: 10px;">对话压缩：</span>
+                        <select id="compress-mode" onchange="updateCompressUI()" style="padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px;">
+                            <option value="none">不压缩（完整历史）</option>
+                            <option value="sliding_window">滑动窗口</option>
+                            <option value="token_limit">Token限制</option>
+                            <option value="summary">摘要压缩（旧消息压缩为摘要）</option>
+                            <option value="layered">分层压缩（重要+摘要+最近）</option>
+                            <option value="afm">AFM自适应（LLM分类+三档保真度）</option>
+                            <option value="topic">话题分段（LLM切分+每段独立摘要）</option>
+                        </select>
+                        <span id="compress-count-wrap" style="display:none;margin-left:10px;">
+                            <span id="compress-count-label" style="color:#666;font-size:13px;">保留</span>
+                            <input type="number" id="compress-count" value="10" min="1" max="10000" style="width:60px;padding:5px;border:1px solid #ddd;border-radius:4px;font-size:13px;">
+                            <span id="compress-count-unit" style="color:#666;font-size:13px;">条</span>
+                        </span>
+                        <span style="margin-left: auto; display:flex; align-items:center; gap:12px;">
+                            <span id="compress-hint" style="color: #64748b; font-size: 12px; font-weight:bold;"></span>
+                            <span id="session-id-display" style="font-size:11px;color:#1e40af;font-family:monospace;font-weight:bold;white-space:nowrap;">💬 待创建</span>
+                            <button id="session-copy-btn" onclick="copyCurrentSessionId()" style="display:none;background:#3b82f6;color:white;border:none;border-radius:4px;font-size:10px;padding:2px 8px;cursor:pointer;">复制ID</button>
+                            <button id="context-btn" onclick="showContextEditor()" style="display:none;background:#10b981;color:white;border:none;border-radius:4px;font-size:10px;padding:2px 8px;cursor:pointer;">📋 上下文</button>
+                        </span>
+                    </div>
+                    <div class="chat-messages" id="chat-messages">
+                        <div style="text-align: center; color: #666; padding: 40px;">
+                            <p>开始新对话或选择历史会话</p>
+                            <p style="margin-top: 10px; font-size: 12px;">对话历史会自动保存</p>
+                        </div>
+                    </div>
+                    <div class="chat-input-area">
+                        <textarea id="chat-input" placeholder="输入消息..." onkeypress="handleKeyPress(event)"></textarea>
+                        <button class="btn" onclick="sendMessage()" id="send-btn">发送</button>
+                    </div>
+                </div>
+                <div class="chat-sidebar">
+                    <button class="btn btn-small new-session-btn" onclick="newSession()">新建对话</button>
+                    <div style="font-size: 14px; color: #666; margin-bottom: 10px;">历史会话：</div>
+                    <div class="session-list" id="session-list"></div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="langgraph-tab" class="card hidden">
+            <h2>🔗 LangGraph 任务编排可视化</h2>
+            
+            <!-- 演示模式 -->
+            <div style="margin-bottom: 15px;">
+                <h4 style="color:#64748b;margin-bottom:8px;">🎯 演示模式（固定结构）</h4>
+                <input type="text" id="langgraph-input" value="测试输入" style="width: 300px; padding: 8px; border: 1px solid #ddd; border-radius: 4px;">
+                <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 15px; margin-top: 10px;">
+                    <button class="btn" onclick="showLangGraphStructure('parallel')" style="background: linear-gradient(135deg, #667eea, #764ba2);">🔀 并行执行</button>
+                    <button class="btn" onclick="showLangGraphStructure('conditional')" style="background: linear-gradient(135deg, #f093fb, #f5576c);">🔀 条件路由</button>
+                    <button class="btn" onclick="showLangGraphStructure('stream')" style="background: linear-gradient(135deg, #4facfe, #00f2fe);">▶️ 流式执行</button>
+                    <button class="btn" onclick="showLangGraphStructure('subgraph')" style="background: linear-gradient(135deg, #34d399, #059669);">📦 子图</button>
+                    <button class="btn" onclick="showLangGraphStructure('llm_conditional')" style="background: linear-gradient(135deg, #f59e0b, #d97706);">🤖 LLM 路由</button>
+                </div>
+            </div>
+            
+            <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;">
+            
+            <!-- AI 任务拆解 -->
+            <div style="margin-bottom: 15px;">
+                <h4 style="color:#10b981;margin-bottom:8px;">🤖 AI 任务拆解（真实动态分解）</h4>
+                <p style="color:#64748b;font-size:13px;">输入一个真实任务，LLM 自动拆解为子任务并执行</p>
+                <div style="display:flex;gap:10px;">
+                    <input type="text" id="decompose-input" placeholder="输入一个任务，比如：写一篇关于AI的文章" style="flex:1;padding:10px;border:1px solid #10b981;border-radius:6px;font-size:14px;">
+                    <button class="btn" onclick="runDecompose()" style="background:#10b981;color:white;white-space:nowrap;">🚀 拆解执行</button>
+                </div>
+            </div>
+            
+            <div id="langgraph-viz" style="background: #ffffff; border: 2px solid #e2e8f0; border-radius: 12px; padding: 20px; margin-bottom: 15px; display: none;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                    <h4 id="graph-title" style="margin: 0; color: #1e40af;">图结构</h4>
+                    <span id="graph-desc" style="color: #64748b; font-size: 13px;"></span>
+                </div>
+                <div id="mermaid-container" style="text-align: center;"></div>
+            </div>
+
+            <div id="langgraph-results"></div>
+        </div>
+        
+        <div id="agent-tab" class="card hidden">
+            <h2>🤖 真实 Agent 执行引擎</h2>
+            <p style="color: #666; margin-bottom: 15px;">LLM 拆解任务 → 分配工具 → 按依赖执行 → 上下文传递 → 验证结果</p>
+            <div style="margin-bottom:15px;">
+                <div style="display:flex;gap:10px;">
+                    <input type="text" id="agent-input" placeholder="输入任务，比如：用Rust写一个web服务器" style="flex:1;padding:10px;border:1px solid #8b5cf6;border-radius:6px;font-size:14px;">
+                    <button class="btn" onclick="runAgentPlan()" style="background:#8b5cf6;color:white;white-space:nowrap;">📋 规划</button>
+                </div>
+                <div style="margin-top:8px;display:flex;gap:20px;align-items:center;">
+                    <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#64748b;">
+                        <input type="checkbox" id="agent-rag-toggle" checked> 🔍 检索知识库 (RAG)
+                    </label>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#64748b;">
+                        <input type="checkbox" id="agent-routing-toggle"> 🔀 条件路由（决策节点动态选路径）
+                    </label>
+                </div>
+            </div>
+            <div id="agent-viz" style="background:#fff;border:2px solid #e2e8f0;border-radius:12px;padding:20px;margin-bottom:15px;display:none;">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;">
+                    <h4 id="agent-graph-title" style="margin:0;color:#7c3aed;">Agent 规划</h4>
+                    <span id="agent-graph-desc" style="color:#64748b;font-size:13px;"></span>
+                </div>
+                <div id="agent-container" style="text-align:center;"></div>
+            </div>
+            <div id="agent-plan-detail" style="display:none;">
+                <button class="btn" onclick="runAgentExecute()" style="background:#8b5cf6;color:white;margin-bottom:15px;">▶ 执行所有任务</button>
+            </div>
+            <div id="agent-results"></div>
+        </div>
+        
+        <div id="aggregate-tab" class="card hidden">
+            <h2>🌐 AI信息聚合</h2>
+            <p style="color: #666; margin-bottom: 15px;">采集GitHub、Hacker News、RSS博客、ArXiv论文的AI Agent相关内容</p>
+            
+            <div class="aggregate-stats" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px;">
+                <div class="stat-card" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; border-radius: 8px;">
+                    <div style="font-size: 28px; font-weight: bold;" id="agg-total">0</div>
+                    <div style="font-size: 12px;">总内容数</div>
+                </div>
+                <div class="stat-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; padding: 15px; border-radius: 8px;">
+                    <div style="font-size: 28px; font-weight: bold;" id="agg-github">0</div>
+                    <div style="font-size: 12px;">GitHub</div>
+                </div>
+                <div class="stat-card" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); color: white; padding: 15px; border-radius: 8px;">
+                    <div style="font-size: 28px; font-weight: bold;" id="agg-hn">0</div>
+                    <div style="font-size: 12px;">Hacker News</div>
+                </div>
+                <div class="stat-card" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); color: white; padding: 15px; border-radius: 8px;">
+                    <div style="font-size: 28px; font-weight: bold;" id="agg-arxiv">0</div>
+                    <div style="font-size: 12px;">ArXiv</div>
+                </div>
+            </div>
+            
+            <div style="margin-bottom: 20px;">
+                <button class="btn" onclick="collectAll()" id="collect-btn">🚀 开始采集</button>
+                <button class="btn" onclick="loadAggregateList()" style="margin-left: 10px;">🔄 刷新列表</button>
+                <span id="collect-status" style="margin-left: 15px; color: #666;"></span>
+            </div>
+            
+            <div style="margin-bottom: 15px; display: flex; gap: 10px; align-items: center;">
+                <span style="color: #666;">数据源筛选：</span>
+                <select id="agg-source-filter" onchange="loadAggregateList()" style="padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px;">
+                    <option value="">全部</option>
+                    <option value="github">GitHub</option>
+                    <option value="hackernews">Hacker News</option>
+                    <option value="rss">RSS博客</option>
+                    <option value="arxiv">ArXiv</option>
+                </select>
+                <span style="color: #666; margin-left: 20px;">搜索：</span>
+                <input type="text" id="agg-search-input" placeholder="搜索内容..." style="padding: 5px 10px; border: 1px solid #ddd; border-radius: 4px; width: 200px;">
+                <button class="btn btn-small" onclick="aggregateSearch()">搜索</button>
+            </div>
+            
+            <div id="aggregate-list" style="max-height: 600px; overflow-y: auto;">
+                <div style="text-align: center; color: #666; padding: 40px;">
+                    <p>点击"开始采集"获取最新AI动态</p>
+                </div>
+            </div>
+        </div>
+        
+        <div id="monitor-tab" class="card hidden">
+            <h2>📊 系统监控面板</h2>
+            <p style="color: #666; margin-bottom: 15px;">API调用统计、Token消耗、性能监控</p>
+            
+            <div class="monitor-stats" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px;">
+                <div class="stat-card" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 12px;">
+                    <div style="font-size: 32px; font-weight: bold;" id="monitor-total-calls">0</div>
+                    <div style="font-size: 14px;">总调用次数</div>
+                </div>
+                <div class="stat-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; padding: 20px; border-radius: 12px;">
+                    <div style="font-size: 32px; font-weight: bold;" id="monitor-total-tokens">0</div>
+                    <div style="font-size: 14px;">总Token消耗</div>
+                </div>
+                <div class="stat-card" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%); color: white; padding: 20px; border-radius: 12px;">
+                    <div style="font-size: 32px; font-weight: bold;" id="monitor-calls-today">0</div>
+                    <div style="font-size: 14px;">今日调用</div>
+                </div>
+                <div class="stat-card" style="background: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%); color: white; padding: 20px; border-radius: 12px;">
+                    <div style="font-size: 32px; font-weight: bold;" id="monitor-tokens-today">0</div>
+                    <div style="font-size: 14px;">今日Token</div>
+                </div>
+            </div>
+            
+            <div style="margin-bottom: 20px;">
+                <button class="btn" onclick="loadMonitorStats()">🔄 刷新统计</button>
+                <span style="margin-left: 15px; color: #666;" id="monitor-success-rate">成功率: --</span>
+                <span style="margin-left: 15px; color: #666;" id="monitor-avg-duration">平均耗时: --</span>
+            </div>
+            
+            <h3 style="color: #1e40af; margin-bottom: 15px;">API类型分布</h3>
+            <div id="monitor-api-types" style="display: grid; gap: 10px;"></div>
+            
+            <h3 style="color: #1e40af; margin-bottom: 15px; margin-top: 20px;">统计图表</h3>
+            <canvas id="monitor-chart" style="max-height: 300px;"></canvas>
+        </div>
+        
+        <div id="compress-tab" class="card hidden">
+            <h2>⚙️ 压缩策略学习</h2>
+            <p style="color: #666; margin-bottom: 15px;">可视化理解对话压缩原理，实时调整参数</p>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                <div style="background: #f8fafc; padding: 20px; border-radius: 12px;">
+                    <h3 style="color: #1e40af; margin-bottom: 15px;">📊 当前配置参数</h3>
+                    <div id="compress-config">
+                        <div class="config-item"><span>最大历史消息:</span><span id="cfg-max-history">50</span></div>
+                        <div class="config-item"><span>压缩阈值:</span><span id="cfg-threshold">15</span></div>
+                        <div class="config-item"><span>保留最近:</span><span id="cfg-keep-recent">5</span></div>
+                        <div class="config-item"><span>重要关键词:</span><span id="cfg-keywords">我的名字,我是,记住</span></div>
+                        <div class="config-item"><span>摘要模型:</span><span id="cfg-summary-model">gpt-3.5-turbo</span></div>
+                    </div>
+                </div>
+                
+                <div style="background: #f8fafc; padding: 20px; border-radius: 12px;">
+                    <h3 style="color: #1e40af; margin-bottom: 15px;">🧪 参数调整实验</h3>
+                    <div style="display: grid; gap: 10px;">
+                        <div>
+                            <label style="font-size: 13px; color: #475569;">压缩阈值:</label>
+                            <input type="range" id="exp-threshold" min="5" max="50" value="15" style="width: 100%;" oninput="updateCompressExp()">
+                            <span id="exp-threshold-val" style="color: #1e40af; font-weight: bold;">15</span>
+                        </div>
+                        <div>
+                            <label style="font-size: 13px; color: #475569;">保留最近:</label>
+                            <input type="range" id="exp-keep-recent" min="2" max="20" value="5" style="width: 100%;" oninput="updateCompressExp()">
+                            <span id="exp-keep-recent-val" style="color: #1e40af; font-weight: bold;">5</span>
+                        </div>
+                        <div>
+                            <label style="font-size: 13px; color: #475569;">模拟消息数:</label>
+                            <input type="range" id="exp-messages" min="5" max="100" value="30" style="width: 100%;" oninput="updateCompressExp()">
+                            <span id="exp-messages-val" style="color: #1e40af; font-weight: bold;">30</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <h3 style="color: #1e40af; margin-bottom: 15px; margin-top: 20px;">📈 压缩效果可视化</h3>
+            <div id="compress-visual" style="background: #f8fafc; padding: 20px; border-radius: 12px;">
+                <div id="compress-flow" style="display: flex; gap: 10px; flex-wrap: wrap; justify-content: center;"></div>
+                <div id="compress-result" style="margin-top: 15px; text-align: center;"></div>
+            </div>
+            
+            <h3 style="color: #1e40af; margin-bottom: 15px; margin-top: 20px;">📚 压缩模式对比</h3>
+            <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px;">
+                <div class="mode-card" onclick="showModeDetail('none')">
+                    <div class="mode-title">None</div>
+                    <div class="mode-desc">不压缩</div>
+                </div>
+                <div class="mode-card" onclick="showModeDetail('sliding_window')">
+                    <div class="mode-title">滑动窗口</div>
+                    <div class="mode-desc">保留最近N条</div>
+                </div>
+                <div class="mode-card" onclick="showModeDetail('token_limit')">
+                    <div class="mode-title">Token限制</div>
+                    <div class="mode-desc">保留前2条+尾部，限制token</div>
+                </div>
+                <div class="mode-card" onclick="showModeDetail('summary')">
+                    <div class="mode-title">摘要压缩</div>
+                    <div class="mode-desc">全部压缩成摘要</div>
+                </div>
+                <div class="mode-card active" onclick="showModeDetail('layered')">
+                    <div class="mode-title">分层压缩</div>
+                    <div class="mode-desc">重要+摘要+最近</div>
+                </div>
+                <div class="mode-card" onclick="showModeDetail('afm')">
+                    <div class="mode-title">AFM自适应</div>
+                    <div class="mode-desc">LLM三档保真度</div>
+                </div>
+                <div class="mode-card" onclick="showModeDetail('topic')">
+                    <div class="mode-title">话题分段</div>
+                    <div class="mode-desc">LLM按话题切分</div>
+                </div>
+            </div>
+            
+            <div id="mode-detail" style="background: #eff6ff; padding: 20px; border-radius: 12px; margin-top: 15px;">
+                <h4 style="color: #1e40af;">分层压缩流程</h4>
+                <div style="margin-top: 10px; line-height: 1.8; color: #475569;">
+                    <p>1️⃣ 检查消息数量是否超过阈值 (threshold)</p>
+                    <p>2️⃣ 提取包含关键词的消息 → <span style="color: #059669; font-weight: bold;">重要消息</span></p>
+                    <p>3️⃣ 提取最近N条消息 → <span style="color: #3b82f6; font-weight: bold;">最近消息</span></p>
+                    <p>4️⃣ 剩余消息调用LLM生成摘要 → <span style="color: #f59e0b; font-weight: bold;">摘要</span></p>
+                    <p>5️⃣ 组合: 重要 + 摘要 + 最近 → 发送给LLM</p>
+                </div>
+            </div>
+        </div>
+        
+        <div id="pageindex_search-tab" class="card hidden">
+            <h2>📑 PageIndex 全文搜索</h2>
+            <p style="color: #666; margin-bottom: 15px;">搜索 PageIndex 文档树的节点内容（SQLite FTS5）</p>
+            <div class="search-box">
+                <input type="text" id="pageindex-query" placeholder="输入搜索内容..." />
+                <button class="btn" onclick="pageindexSearch()">搜索</button>
+            </div>
+            <div style="margin-top: 10px; color: #666;">
+                <label>返回结果数量：</label>
+                <input type="number" id="pageindex-top-k" value="10" min="1" max="50" style="width: 60px; padding: 5px; border: 1px solid #ddd; border-radius: 4px;">
+            </div>
+            <div id="pageindex-results"></div>
+        </div>
+
+        <div id="sessions-tab" class="card hidden">
+            <h2>会话管理</h2>
+            <div id="sessions-list"></div>
+        </div>
+        
+        <footer style="text-align: center; padding: 8px; color: #94a3b8; font-size: 11px;">
+            LangChainRust Demo — 向量搜索 + BM25 + RAG对话 + LangGraph | Powered by Qdrant + MongoDB + OpenAI
+        </footer>
+        </div>
+    </div>
+    
+    <!-- 详情模态框 -->
+    <div id="detail-modal" onclick="if(event.target.id==='detail-modal')closeDetailModal()" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);z-index:1000;">
+        <div onclick="event.stopPropagation()" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:white;border-radius:12px;padding:24px;width:90%;max-width:800px;max-height:90vh;overflow-y:auto;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+                <h3 style="color:#1e40af;font-size:20px;font-weight:700;">🔍 搜索结果详情</h3>
+                <button onclick="closeDetailModal()" style="background:#f1f5f9;border:none;font-size:20px;cursor:pointer;color:#475569;padding:8px 12px;border-radius:8px;">✕</button>
+            </div>
+            <div id="detail-content"></div>
+        </div>
+    </div>
+    
+    <script src="js/app.js?t=20260510"></script>
+    <script src="js/aggregate.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</body>
+</html>
